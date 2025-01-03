@@ -1,0 +1,117 @@
+variables:
+  azureSubscriptionDev: 'Dev Connection'  # Azure Subscription Service Connection
+  azureSubscriptionProd: 'Prod Connection'  # Azure Subscription Service Connection
+  devResourceGroup: 'DevResourceGroup'
+  prodResourceGroup: 'ProdResourceGroup'
+  location: 'eastasia'
+  appServicePlanName: 'MyAppServicePlan'
+  appServiceNameDev: 'MyWebApp-Dev'
+  appServiceNameProd: 'MyWebApp-Prod'
+  stagingSlotName: 'staging'
+  notifyUsers: 'user1@example.com;user2@example.com' # Add email addresses of users to be notified
+
+trigger:
+  branches:
+    include:
+      - main
+
+stages:
+  - stage: Dev
+    displayName: 'Deploy to Dev'
+    jobs:
+      - job: DeployToDev
+        displayName: 'Deploy Web Service to Dev Resource Group'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureSubscriptionDev)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az deployment group create \
+                  --resource-group $(devResourceGroup) \
+                  --template-file webapp.bicep \
+                  --parameters \
+                    appServiceName=$(appServiceNameDev) \
+                    appServicePlanName=$(appServicePlanName) \
+                    location=$(location)
+                echo "Web Service deployed to Dev"
+            displayName: 'Deploy Web Service'
+
+  - stage: UATApproval
+    displayName: 'Approval to UAT'
+    jobs:
+      - job: ApprovalToUAT
+        displayName: 'Approval to Deploy to UAT'
+        pool: server
+        steps:
+          - task: ManualValidation@0
+            inputs:
+              notifyUsers: $(notifyUsers)
+              instructions: 'Please review the changes and approve deployment to UAT.'
+              onTimeout: 'reject'
+
+  - stage: UAT
+    displayName: 'Deploy to UAT'
+    dependsOn: UATApproval
+    jobs:
+      - job: DeployToUAT
+        displayName: 'Deploy Web Service to UAT Resource Group'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureSubscriptionDev)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az deployment group create \
+                  --resource-group $(devResourceGroup) \
+                  --template-file webapp.bicep \
+                  --parameters \
+                    appServiceName=$(appServiceNameDev) \
+                    appServicePlanName=$(appServicePlanName) \
+                    location=$(location)
+                echo "Web Service deployed to UAT"
+            displayName: 'Deploy Web Service'
+
+  - stage: ProdApproval
+    displayName: 'Approval to Prod'
+    jobs:
+      - job: ApprovalToProd
+        displayName: 'Approval to Deploy to Prod'
+        pool: server
+        steps:
+          - task: ManualValidation@1
+            inputs:
+              notifyUsers: $(notifyUsers)
+              instructions: 'Please review the changes and approve deployment to Prod.'
+              onTimeout: 'reject'
+
+  - stage: Prod
+    displayName: 'Deploy to Prod'
+    dependsOn: ProdApproval
+    jobs:
+      - job: DeployToProd
+        displayName: 'Deploy Web Service to Prod Resource Group with Slot Swap'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureSubscriptionProd)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az lock delete --name "ReadOnlyLock" --resource-group "$(prodResourceGroup)"
+                az webapp deployment slot swap \
+                  --name $(appServiceNameProd) \
+                  --resource-group $(prodResourceGroup) \
+                  --slot $(stagingSlotName) \
+                  --target-slot production
+                az lock create --name "ReadOnlyLock" --resource-group "$(prodResourceGroup)" --lock-type "ReadOnly"
+                echo "Web Service deployed to Prod with zero downtime"
+            displayName: 'Deploy Web Service with Slot Swap'
